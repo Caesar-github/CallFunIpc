@@ -20,23 +20,16 @@
 #include "json-c/json.h"
 #include "dbus.h"
 
-
 #define TIMEOUT         120000
 static DBusConnection *dbusconn = 0;
+static int need_loop = 1;
+GMainLoop *main_loop = NULL;
 
 struct dbus_callback {
     dbus_method_return_func_t cb;
     void *user_data;
 };
 
-struct DbusSignal {
-    char *interface;
-    char *signal;
-    dbus_signal_func_t cb;
-    struct DbusSignal *next;
-};
-
-static struct DbusSignal *dbus_signal_list = NULL;
 static pthread_mutex_t mutex;
 
 static void dbus_method_reply(DBusPendingCall *call, void *user_data)
@@ -97,7 +90,7 @@ end:
     return res;
 }
 
-int dbus_method_call(DBusConnection *connection,
+int callfunipc_dbus_method_call(DBusConnection *connection,
                      const char *service, const char *path, const char *interface,
                      const char *method, dbus_method_return_func_t cb,
                      void *user_data, dbus_append_func_t append_func,
@@ -120,14 +113,14 @@ int dbus_method_call(DBusConnection *connection,
     return send_method_call(connection, message, cb, user_data);
 }
 
-void append_path(DBusMessageIter *iter, void *user_data)
+void callfunipc_append_path(DBusMessageIter *iter, void *user_data)
 {
     const char *path = user_data;
 
     dbus_message_iter_append_basic(iter, DBUS_TYPE_STRING, &path);
 }
 
-int populate_set(DBusMessageIter *iter, const char *error,
+int callfunipc_populate_set(DBusMessageIter *iter, const char *error,
                  void *user_data)
 {
     char *json;
@@ -139,7 +132,7 @@ int populate_set(DBusMessageIter *iter, const char *error,
     return 0;
 }
 
-int populate_get(DBusMessageIter *iter, const char *error,
+int callfunipc_populate_get(DBusMessageIter *iter, const char *error,
                  void *user_data)
 {
     char *json;
@@ -162,40 +155,51 @@ int populate_get(DBusMessageIter *iter, const char *error,
     return 0;
 }
 
-static void *sync_thread(void *arg)
+static void *loop_thread(void *arg)
 {
-    struct UserData* userdata = arg;
+    main_loop = g_main_loop_new(NULL, FALSE);
 
-    pthread_mutex_lock(&userdata->mutex);
-    pthread_mutex_unlock(&userdata->mutex);
-    g_main_loop_quit(userdata->main_loop);
+    //g_timeout_add(100, time_cb, NULL);
+    g_main_loop_run(main_loop);
+
+    if (main_loop)
+        g_main_loop_unref(main_loop);
+
+    main_loop = NULL;
 
     return 0;
 }
 
-void dbus_async(struct UserData* userdata)
+int callfunipc_dbus_async(struct UserData* userdata)
 {
-    pthread_t tid;
+    struct timespec tout;
 
-    userdata->main_loop = g_main_loop_new(NULL, FALSE);
+    if (need_loop && main_loop == NULL) {
+        pthread_t tid;
+        pthread_create(&tid, NULL, (void*)loop_thread, NULL);
+    }
 
-    pthread_create(&tid, NULL, (void*)sync_thread, userdata);
+    clock_gettime(CLOCK_REALTIME, &tout);
+    tout.tv_sec += 1;
 
-    //g_timeout_add(100, time_cb, NULL);
-    g_main_loop_run(userdata->main_loop);
+    if (pthread_mutex_timedlock(&userdata->mutex, &tout) != 0) {
+        printf("%s again get\n", __func__);
+        return -1;
+    }
 
-    if (userdata->main_loop)
-        g_main_loop_unref(userdata->main_loop);
+    pthread_mutex_unlock(&userdata->mutex);
+
+    return 0;
 }
 
-void dbus_deconnection(struct UserData* userdata)
+void callfunipc_dbus_deconnection(struct UserData* userdata)
 {
     dbus_connection_unref(userdata->connection);
     if (userdata)
         g_free(userdata);
 }
 
-struct UserData* dbus_connection(void)
+struct UserData* callfunipc_dbus_connection(void)
 {
     DBusError dbus_err;
     struct UserData* userdata;
@@ -211,108 +215,7 @@ struct UserData* dbus_connection(void)
     return userdata;
 }
 
-static DBusHandlerResult dbus_monitor_changed(
-    DBusConnection *connection,
-    DBusMessage *message, void *user_data)
+void callfunipc_disable_loop(void)
 {
-    bool *enabled = user_data;
-    DBusMessageIter iter;
-    DBusHandlerResult handled;
-
-    handled = DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
-
-    pthread_mutex_lock(&mutex);
-    struct DbusSignal *tmp = dbus_signal_list;
-
-    while(tmp) {
-       if (dbus_message_is_signal(message, tmp->interface,
-                               tmp->signal)) {
-            char *json_str;
-            handled = DBUS_HANDLER_RESULT_HANDLED;
-
-            dbus_message_iter_init(message, &iter);
-            dbus_message_iter_get_basic(&iter, &json_str);
-            if (tmp->cb)
-                tmp->cb(json_str);
-        }
-        tmp = tmp->next;
-    }
-    pthread_mutex_unlock(&mutex);
-
-    return handled;
-}
-
-static struct DbusSignal *check_dbus_signel(char *interface, char *signal, dbus_signal_func_t cb)
-{
-    struct DbusSignal *tmp = dbus_signal_list;
-
-    while(tmp) {
-        if ((cb == tmp->cb) && g_str_equal(interface, tmp->interface) && (g_str_equal(signal, tmp->signal)))
-            break;
-        tmp = tmp->next;
-    }
-
-    return tmp;
-}
-
-static void add_dbus_sigal(struct DbusSignal *dbus_signal)
-{
-    struct DbusSignal *tmp = dbus_signal_list;
-    if (tmp == NULL) {
-        dbus_signal_list = dbus_signal;
-    } else {
-        while(tmp->next) tmp = tmp->next;
-        tmp = dbus_signal;
-    }
-}
-
-void dbus_monitor_signal_registered(char *interface, char *signal, dbus_signal_func_t cb)
-{
-    DBusError err;
-    char *tmp;
-
-    dbus_error_init(&err);
-    if (dbusconn == NULL) {
-        pthread_mutex_init(&mutex, NULL);
-        dbusconn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, NULL, &err);
-        dbus_connection_add_filter(dbusconn, dbus_monitor_changed, NULL, NULL);
-    }
-    if (check_dbus_signel(interface, signal, cb) == NULL) {
-        struct DbusSignal *dbus_signal = (struct DbusSignal *)malloc(sizeof(struct DbusSignal));
-        dbus_signal->interface = g_strdup(interface);
-        dbus_signal->signal = g_strdup(signal);
-        dbus_signal->cb = cb;
-        dbus_signal->next = NULL;
-        add_dbus_sigal(dbus_signal);
-        char *tmp = g_strdup_printf("type='signal',interface='%s'", interface);
-        dbus_bus_add_match(dbusconn, tmp, &err);
-        g_free(tmp);
-    }
-}
-
-void dbus_monitor_signal_unregistered(char *interface, char *signal, dbus_signal_func_t cb)
-{
-    struct DbusSignal *tmp = dbus_signal_list;
-
-    pthread_mutex_lock(&mutex);
-    if ((cb == tmp->cb) && g_str_equal(interface, tmp->interface) && (g_str_equal(signal, tmp->signal))) {
-        g_free(tmp->interface);
-        g_free(tmp->signal);
-        dbus_signal_list = tmp->next;
-        free(tmp);
-    } else {
-        struct DbusSignal *tmp_pre = tmp;
-        tmp = tmp->next;
-        while(tmp) {
-            if ((cb == tmp->cb) && g_str_equal(interface, tmp->interface) && (g_str_equal(signal, tmp->signal))) {
-                g_free(tmp->interface);
-                g_free(tmp->signal);
-                tmp_pre = tmp->next;
-                free(tmp);
-                break;
-            }
-            tmp = tmp->next;
-        }
-    }
-    pthread_mutex_unlock(&mutex);
+    need_loop = 0;
 }

@@ -23,6 +23,23 @@ struct FunMap map[] = {
     {"examples", &examples}
 };
 
+static void main_exit(void)
+{
+    printf("server %s\n", __func__);
+    call_fun_ipc_server_deinit();
+}
+
+void signal_crash_handler(int sig)
+{
+    exit(-1);
+}
+ 
+void signal_exit_handler(int sig)
+{
+    exit(0);
+}
+
+
 int examples(void* data)
 {
     struct Examples_s *para = data;
@@ -34,7 +51,16 @@ int main( int argc , char ** argv)
 {
     GMainLoop *main_loop;
 
-    call_fun_ipc_server_init(map, sizeof(map) / sizeof(struct FunMap), DBUS_NAME, DBUS_IF, DBUS_PATH);
+    atexit(main_exit);
+    signal(SIGTERM, signal_exit_handler);
+    signal(SIGINT, signal_exit_handler);
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGBUS, signal_crash_handler);
+    signal(SIGSEGV, signal_crash_handler);
+    signal(SIGFPE, signal_crash_handler);
+    signal(SIGABRT, signal_crash_handler);
+
+    call_fun_ipc_server_init(map, sizeof(map) / sizeof(struct FunMap), DBUS_NAME, DBUS_IF, DBUS_PATH, 0);
 
     main_loop = g_main_loop_new(NULL, FALSE);
     printf("call_fun_ipc_demo_server init\n");

@@ -9,15 +9,24 @@
 
 static int CommShm(char *name, int projid, int size, int flags)
 {
+    int retry_cnt = 0;
+    int shmid;
     key_t key = ftok(name, projid);
 
-    if(key < 0) {
+    if(key == -1) {
         perror("ftok");
         return -1;
     }
-
-    int shmid = 0;
-    if((shmid = shmget(key, size, flags)) < 0) {
+retry:
+    shmid = shmget(key, size, flags);
+    if(shmid < 0) {
+        if (retry_cnt++ < 2) {
+            shmid = shmget(key, 0, 0);
+            if (shmid != -1) {
+                shmctl(shmid, IPC_RMID, 0);
+                goto retry;
+            }
+        }
         perror("shmget");
         return -2;
     }

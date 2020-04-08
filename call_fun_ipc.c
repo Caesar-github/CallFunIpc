@@ -31,6 +31,81 @@ char *DbusPath = NULL;
 char *DbusIf = NULL;
 char *SharePath = NULL;
 
+struct Share_s {
+    char *addr;
+    int shmid;
+    struct Share_s* next;
+};
+
+static struct Share_s* share_client_list = NULL;
+static struct Share_s* share_server_list = NULL;
+
+void client_list_add(struct Share_s* share)
+{
+    if (share_client_list == NULL) {
+        share_client_list = share;
+    } else {
+        struct Share_s* tmp = share_client_list;
+        while (tmp->next) {
+            tmp = tmp->next;
+        }
+        tmp->next = share;
+    }
+}
+
+void client_list_del(int shmid)
+{
+    if (share_client_list) {
+        if (share_client_list->shmid == shmid) {
+            struct Share_s* tmp = share_client_list->next;
+            free(share_client_list);
+            share_client_list = tmp;
+        } else {
+            struct Share_s* tmp = share_client_list;
+            while (tmp->next) {
+                if (tmp->next->shmid == shmid) {
+                   struct Share_s* tmp_next = tmp->next;
+                   tmp->next = tmp_next->next;
+                   free(tmp_next);
+                }
+            }
+        }
+    }
+}
+
+void server_list_add(struct Share_s* share)
+{
+    if (share_server_list == NULL) {
+        share_server_list = share;
+    } else {
+        struct Share_s* tmp = share_server_list;
+        while (tmp->next) {
+            tmp = tmp->next;
+        }
+        tmp->next = share;
+    }
+}
+
+void server_list_del(int shmid)
+{
+    if (share_server_list) {
+        if (share_server_list->shmid == shmid) {
+            struct Share_s* tmp = share_server_list->next;
+            free(share_server_list);
+            share_server_list = tmp;
+        } else {
+            struct Share_s* tmp = share_server_list;
+            while (tmp->next) {
+                if (tmp->next->shmid == shmid) {
+                   struct Share_s* tmp_next = tmp->next;
+                   tmp->next = tmp_next->next;
+                   free(tmp_next);
+                }
+            }
+        }
+    }
+}
+
 DBusMessage *dbus_message_new_method_return_string(DBusMessage *msg, char *str)
 {
     DBusMessageIter array;
@@ -61,13 +136,24 @@ DBusMessage *method_callfun(DBusConnection *conn,
     for (int i = 0; i < fun_num; i++) {
         if (fun_map[i].fun_name && fun_map[i].fun) {
             if (!strcmp(fun_map[i].fun_name, FunName)) {
+                void *addr = NULL;
                 char *SharePath = (char *)json_object_get_string(json_object_object_get(j_cfg, "SharePath"));
                 int ShareId = (int)json_object_get_int(json_object_object_get(j_cfg, "ShareId"));
                 int ShareSize = (int)json_object_get_int(json_object_object_get(j_cfg, "ShareSize"));
                 int shmid = GetShm(SharePath, ShareId, ShareSize);
-                void *para_share = (void *)Shmat(shmid);
-                fun_map[i].fun(para_share);
-                Shmdt((char *)para_share);
+                if (ShareSize > 0) {
+                    struct Share_s *share_server;
+                    addr = (void *)Shmat(shmid);
+                    share_server = calloc(sizeof(struct Share_s), 1);
+                    share_server->shmid = shmid;
+                    share_server->addr = addr;
+                    server_list_add(share_server);
+                }
+                fun_map[i].fun(addr);
+                if (ShareSize > 0) {
+                    Shmdt((char *)addr);
+                    server_list_del(shmid);
+                }
             }
         }
     }
@@ -111,10 +197,12 @@ static int dbus_manager_init(DBusConnection *dbus_conn, char *dbus_if, char *dbu
     return 0;
 }
 
-void call_fun_ipc_server_init(struct FunMap *map, int num, char *dbus_name, char *dbus_if, char *dbus_path)
+void call_fun_ipc_server_init(struct FunMap *map, int num, char *dbus_name, char *dbus_if, char *dbus_path, int needloop)
 {
     DBusError dbus_err;
 
+    if (needloop == 0)
+        callfunipc_disable_loop();
     dbus_error_init(&dbus_err);
     dbus_conn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, dbus_name, &dbus_err);
     fun_map = map;
@@ -124,35 +212,60 @@ void call_fun_ipc_server_init(struct FunMap *map, int num, char *dbus_name, char
 
 void call_fun_ipc_server_deinit(void)
 {
+    struct Share_s* tmp = share_server_list;
 
+    while (tmp) {
+        struct Share_s* tmp1 = tmp;
+
+        if (tmp->addr >= 0)
+            Shmdt((char *)tmp->addr);
+        tmp = tmp->next;
+        free(tmp1);
+    }
 }
 
 int call_fun_ipc_call(char *funname, void *data, int len, int restore)
 {
+    int retry_cnt = 0;
     static int projid = 0;
-    int ret = -1;
+    int ret = 0xfefefefe;
     char *str_ret = NULL;
+    int shmid;
+    void *addr;
     json_object *j_cfg = json_object_new_object();
 
-    projid++;
-    int shmid = CreateShm((char *)SharePath, projid, len);
-    void *para_share = (void *)Shmat(shmid);
-    memcpy(para_share, data, len);
+    if (len > 0) {
+        struct Share_s *share_client;
+        projid++;
+
+        shmid = CreateShm((char *)SharePath, projid, len);
+        if (shmid < 0)
+            return ret;
+        addr = (void *)Shmat(shmid);
+        share_client = calloc(sizeof(struct Share_s), 1);
+        share_client->shmid = shmid;
+        share_client->addr = addr;
+        client_list_add(share_client);
+        memcpy(addr, data, len);
+    }
     json_object_object_add(j_cfg, "FunName", json_object_new_string(funname));
     json_object_object_add(j_cfg, "SharePath", json_object_new_string(SharePath));
     json_object_object_add(j_cfg, "ShareId", json_object_new_int(projid));
     json_object_object_add(j_cfg, "ShareSize", json_object_new_int(len));
 
     struct UserData* userdata;
-    userdata = dbus_connection();
-
-    dbus_method_call(userdata->connection,
+    userdata = callfunipc_dbus_connection();
+    retry_cnt = 0;
+retry:
+    callfunipc_dbus_method_call(userdata->connection,
                      DbusName, DbusPath,
                      DbusIf, "callfun",
-                     populate_get, userdata, append_path, (char *)json_object_to_json_string(j_cfg));
-    dbus_async(userdata);
+                     callfunipc_populate_get, userdata, callfunipc_append_path, (char *)json_object_to_json_string(j_cfg));
+    if (callfunipc_dbus_async(userdata) == -1 && retry_cnt++ < 2)
+        goto retry;
+
     str_ret = userdata->json_str;
-    dbus_deconnection(userdata);
+    callfunipc_dbus_deconnection(userdata);
 
     json_object_put(j_cfg);
 
@@ -162,27 +275,48 @@ int call_fun_ipc_call(char *funname, void *data, int len, int restore)
         json_object_put(j_ret);
         g_free(str_ret);
     }
-    if (restore)
-        memcpy(data, para_share, len);
-    Shmdt((char *)para_share);
-    DestroyShm(shmid);
+    if (len > 0) {
+        if (restore)
+            memcpy(data, addr, len);
+        Shmdt((char *)addr);
+        DestroyShm(shmid);
+        client_list_del(shmid);
+    }
 
     return ret;
 }
 
-void call_fun_ipc_client_init(char *dbus_name, char *dbus_if, char *dbus_path, char *share_path)
+void call_fun_ipc_client_init(char *dbus_name, char *dbus_if, char *dbus_path, char *share_path, int needloop)
 {
     DBusError dbus_err;
 
+    if (needloop == 0)
+        callfunipc_disable_loop();
     dbus_error_init(&dbus_err);
-    dbus_conn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, dbus_name, &dbus_err);
+    dbus_conn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, NULL, &dbus_err);
+    printf("%s dbus_conn = %d\n", __func__, dbus_conn);
     DbusName = g_strdup(dbus_name);
     DbusPath = g_strdup(dbus_path);
     DbusIf = g_strdup(dbus_if);
     SharePath = g_strdup(share_path);
+    while (call_fun_ipc_call("", NULL, 0, 0) == 0xfefefefe) {
+        usleep(100000);
+        //printf("%s wait\n", __func__);
+    }
 }
 
 void call_fun_ipc_client_deinit(void)
 {
+    struct Share_s* tmp = share_client_list;
 
+    while (tmp) {
+        struct Share_s* tmp1 = tmp;
+
+        if (tmp->addr >= 0)
+            Shmdt((char *)tmp->addr);
+        if (tmp->shmid >= 0)
+            DestroyShm(tmp->shmid);
+        tmp = tmp->next;
+        free(tmp1);
+    }
 }
