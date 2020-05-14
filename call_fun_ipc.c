@@ -214,6 +214,7 @@ void call_fun_ipc_server_deinit(void)
 {
     struct Share_s* tmp = share_server_list;
 
+    share_server_list = NULL;
     while (tmp) {
         struct Share_s* tmp1 = tmp;
 
@@ -309,6 +310,7 @@ void call_fun_ipc_client_deinit(void)
 {
     struct Share_s* tmp = share_client_list;
 
+    share_client_list = NULL;
     while (tmp) {
         struct Share_s* tmp1 = tmp;
 
