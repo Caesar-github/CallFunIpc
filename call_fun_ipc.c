@@ -23,7 +23,7 @@
 #include "shared_memory.h"
 #include "dbus.h"
 
-DBusConnection *dbus_conn = NULL;
+static DBusConnection *dbus_conn_s = NULL;
 static struct FunMap *fun_map = NULL;
 static int fun_num = 0;
 char *DbusName = NULL;
@@ -204,10 +204,10 @@ void call_fun_ipc_server_init(struct FunMap *map, int num, char *dbus_name, char
     if (needloop == 0)
         callfunipc_disable_loop();
     dbus_error_init(&dbus_err);
-    dbus_conn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, dbus_name, &dbus_err);
+    dbus_conn_s = g_dbus_setup_bus(DBUS_BUS_SYSTEM, dbus_name, &dbus_err);
     fun_map = map;
     fun_num = num;
-    dbus_manager_init(dbus_conn, dbus_if, dbus_path);
+    dbus_manager_init(dbus_conn_s, dbus_if, dbus_path);
 }
 
 void call_fun_ipc_server_deinit(void)
@@ -294,8 +294,8 @@ void call_fun_ipc_client_init(char *dbus_name, char *dbus_if, char *dbus_path, c
     if (needloop == 0)
         callfunipc_disable_loop();
     dbus_error_init(&dbus_err);
-    dbus_conn = g_dbus_setup_bus(DBUS_BUS_SYSTEM, NULL, &dbus_err);
-    printf("%s dbus_conn = %d\n", __func__, dbus_conn);
+    dbus_conn_s = g_dbus_setup_bus(DBUS_BUS_SYSTEM, NULL, &dbus_err);
+    printf("%s dbus_conn_s = %d\n", __func__, dbus_conn_s);
     DbusName = g_strdup(dbus_name);
     DbusPath = g_strdup(dbus_path);
     DbusIf = g_strdup(dbus_if);
